@@ -110,24 +110,76 @@ def build_scaling_rotation(s, r):
     return L
 
 def safe_state(silent):
-    old_f = sys.stdout
+    """
+    安全状态初始化函数：设置确定性的随机数种子并自定义输出格式
+    
+    参数:
+    - silent: 布尔值，是否启用静默模式（不输出信息）
+    
+    功能:
+    1. 自定义标准输出格式，为每行输出添加时间戳
+    2. 设置所有随机数生成器的种子，确保实验的可重复性
+    3. 设置CUDA设备
+    """
+    
+    # ===== 保存原始标准输出 =====
+    old_f = sys.stdout  # 保存原始的sys.stdout对象，用于实际的输出操作
+    
+    # ===== 自定义输出类 =====
     class F:
+        """
+        自定义输出类，用于重写标准输出的行为
+        主要功能：为输出信息添加时间戳，并支持静默模式
+        """
         def __init__(self, silent):
-            self.silent = silent
-
+            """
+            初始化自定义输出类
+            
+            参数:
+            - silent: 是否启用静默模式
+            """
+            self.silent = silent  # 存储静默模式标志
+            
         def write(self, x):
-            if not self.silent:
-                if x.endswith("\n"):
-                    old_f.write(x.replace("\n", " [{}]\n".format(str(datetime.now().strftime("%d/%m %H:%M:%S")))))
+            """
+            重写write方法，自定义输出格式
+            
+            参数:
+            - x: 要输出的字符串
+            """
+            if not self.silent:  # 只有在非静默模式下才输出
+                if x.endswith("\n"):  # 如果字符串以换行符结尾
+                    # 在换行符前插入时间戳
+                    # 时间格式：[日/月 时:分:秒]，例如：[25/12 14:30:45]
+                    old_f.write(x.replace("\n", " [{}]\n".format(
+                        str(datetime.now().strftime("%d/%m %H:%M:%S")))))
                 else:
+                    # 如果不以换行符结尾，直接输出原始内容
                     old_f.write(x)
-
+                    
         def flush(self):
-            old_f.flush()
+            """
+            重写flush方法，确保输出缓冲区被刷新
+            这对于实时输出很重要
+            """
+            old_f.flush()  # 调用原始输出对象的flush方法
 
+    # ===== 替换标准输出 =====
+    # 将系统的标准输出替换为我们自定义的输出类实例
+    # 从此刻开始，所有的print语句都会使用我们的自定义格式
     sys.stdout = F(silent)
 
-    random.seed(0)
-    np.random.seed(0)
-    torch.manual_seed(0)
+    # ===== 设置随机数种子以确保可重复性 =====
+    # 这是机器学习实验中的重要步骤，确保每次运行得到相同的结果
+    
+    random.seed(0)      # 设置Python内置random模块的种子
+    np.random.seed(0)   # 设置NumPy随机数生成器的种子  
+    torch.manual_seed(0)  # 设置PyTorch CPU随机数生成器的种子
+    
+    # 注意：这里没有设置torch.cuda.manual_seed(0)，
+    # 如果需要CUDA操作也完全可重复，应该添加这行代码
+    
+    # ===== 设置CUDA设备 =====
+    # 显式设置使用第一个CUDA设备（GPU 0）
+    # 这确保了在多GPU环境中有一致的设备选择
     torch.cuda.set_device(torch.device("cuda:0"))

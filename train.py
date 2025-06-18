@@ -260,97 +260,239 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-def prepare_output_and_logger(args):    
-    if not args.model_path:
+def prepare_output_and_logger(args):
+    """
+    准备输出目录和日志记录器
+    
+    参数:
+    - args: 命令行参数对象，包含所有训练配置
+    
+    返回:
+    - tb_writer: TensorBoard写入器对象，用于记录训练日志
+    """
+    
+    # ===== 确定模型输出路径 =====
+    if not args.model_path:  # 如果用户没有指定输出路径
+        # 尝试从环境变量获取作业ID（通常在集群环境中使用）
         if os.getenv('OAR_JOB_ID'):
-            unique_str=os.getenv('OAR_JOB_ID')
+            # OAR是一个作业调度系统，在高性能计算集群中常用
+            # 使用作业ID作为唯一标识符，便于在集群环境中管理多个实验
+            unique_str = os.getenv('OAR_JOB_ID')
         else:
+            # 如果不在集群环境中，生成一个随机的UUID作为唯一标识符
+            # UUID4生成完全随机的标识符，确保不同实验之间不会冲突
             unique_str = str(uuid.uuid4())
+        
+        # 构建输出路径：./output/ + 唯一标识符的前10个字符
+        # 只取前10个字符是为了保持路径简洁，同时保证足够的唯一性
         args.model_path = os.path.join("./output/", unique_str[0:10])
         
-    # Set up output folder
-    print("Output folder: {}".format(args.model_path))
-    os.makedirs(args.model_path, exist_ok = True)
+    # ===== 创建输出目录 =====
+    print("Output folder: {}".format(args.model_path))  # 输出将要使用的目录路径
+    
+    # 创建输出目录，exist_ok=True表示如果目录已存在也不会报错
+    # 这样可以安全地重复运行程序而不用担心目录冲突
+    os.makedirs(args.model_path, exist_ok=True)
+    
+    # ===== 保存配置参数 =====
+    # 将所有命令行参数保存到文件中，便于后续复现实验
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        # vars(args)将args对象转换为字典
+        # Namespace(**vars(args))重新构建一个Namespace对象
+        # str()将其转换为字符串格式保存
+        # 这样做的目的是确保参数以标准格式保存，便于阅读和解析
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
+    # ===== 创建TensorBoard日志记录器 =====
+    tb_writer = None  # 初始化为None，如果TensorBoard不可用则保持None
+    
+    if TENSORBOARD_FOUND:  # 检查是否成功导入了TensorBoard
+        # 创建SummaryWriter对象，用于记录训练过程中的各种指标
+        # 日志文件将保存在args.model_path目录中
         tb_writer = SummaryWriter(args.model_path)
+        
+        # TensorBoard的主要功能：
+        # - 记录损失函数变化曲线
+        # - 保存训练和测试图像
+        # - 记录模型参数分布
+        # - 记录其他自定义指标
     else:
+        # 如果TensorBoard不可用，输出警告信息
+        # 程序仍然可以正常运行，只是不会有可视化日志
         print("Tensorboard not available: not logging progress")
-    return tb_writer
+    
+    return tb_writer  # 返回TensorBoard写入器（可能为None）
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+    """
+    训练报告函数：记录训练日志并在指定迭代进行模型评估
+    
+    参数:
+    - tb_writer: TensorBoard写入器，用于记录训练指标
+    - iteration: 当前迭代次数
+    - Ll1: 当前的L1损失值
+    - loss: 当前的总损失值
+    - l1_loss: L1损失计算函数
+    - elapsed: 当前迭代耗时
+    - testing_iterations: 需要进行测试的迭代次数列表
+    - scene: 场景对象，包含训练和测试相机
+    - renderFunc: 渲染函数
+    - renderArgs: 渲染函数的参数
+    - train_test_exp: 是否使用训练测试曝光
+    """
+    
+    # ===== TensorBoard日志记录 =====
     if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
+        # 记录训练损失到TensorBoard
+        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)      # L1损失
+        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)  # 总损失
+        tb_writer.add_scalar('iter_time', elapsed, iteration)                          # 迭代耗时
 
-    # Report test and samples of training set
+    # ===== 模型评估（仅在指定迭代进行） =====
     if iteration in testing_iterations:
+        # 清理GPU缓存，为评估腾出内存空间
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+        
+        # 定义验证配置：包含测试集和训练集样本
+        validation_configs = (
+            {
+                'name': 'test',                    # 配置名称：测试集
+                'cameras': scene.getTestCameras()  # 使用所有测试相机
+            }, 
+            {
+                'name': 'train',                   # 配置名称：训练集样本
+                # 从训练相机中选择样本：索引5,10,15,20,25（每5个选一个，最多到30）
+                'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] 
+                           for idx in range(5, 30, 5)]
+            }
+        )
 
+        # ===== 遍历每个验证配置 =====
         for config in validation_configs:
+            # 检查当前配置是否有可用的相机
             if config['cameras'] and len(config['cameras']) > 0:
-                l1_test = 0.0
-                psnr_test = 0.0
+                # 初始化累积指标
+                l1_test = 0.0    # 累积L1损失
+                psnr_test = 0.0  # 累积PSNR值
+                
+                # ===== 遍历当前配置中的每个相机视角 =====
                 for idx, viewpoint in enumerate(config['cameras']):
+                    # 渲染当前视角
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    # 获取真实图像并限制像素值范围到[0,1]
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    
+                    # 如果启用了训练测试曝光，只使用图像的右半部分
+                    # 这是一种特殊的训练策略，用于处理曝光变化
                     if train_test_exp:
-                        image = image[..., image.shape[-1] // 2:]
-                        gt_image = gt_image[..., gt_image.shape[-1] // 2:]
-                    if tb_writer and (idx < 5):
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        image = image[..., image.shape[-1] // 2:]       # 取右半部分
+                        gt_image = gt_image[..., gt_image.shape[-1] // 2:]  # 取右半部分
+                    
+                    # ===== TensorBoard图像记录 =====
+                    if tb_writer and (idx < 5):  # 只记录前5张图像，避免过多占用存储
+                        # 记录渲染结果
+                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), 
+                                           image[None], global_step=iteration)
+                        
+                        # 在第一次测试迭代时记录真实图像作为参考
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
-                psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), 
+                                               gt_image[None], global_step=iteration)
+                    
+                    # ===== 累积评估指标 =====
+                    l1_test += l1_loss(image, gt_image).mean().double()    # 累加L1损失
+                    psnr_test += psnr(image, gt_image).mean().double()     # 累加PSNR值
+                
+                # ===== 计算平均指标 =====
+                psnr_test /= len(config['cameras'])  # 平均PSNR
+                l1_test /= len(config['cameras'])    # 平均L1损失
+                
+                # ===== 输出评估结果 =====
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(
+                    iteration, config['name'], l1_test, psnr_test))
+                
+                # ===== 记录评估指标到TensorBoard =====
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
+        # ===== 记录场景统计信息 =====
         if tb_writer:
+            # 记录高斯点的不透明度分布直方图
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            # 记录当前高斯点的总数量
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        
+        # 再次清理GPU缓存
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    # Set up command line argument parser
+    # 程序入口点：只有当脚本被直接运行时才执行以下代码
+    # 这是Python的标准做法，防止模块被导入时执行主程序代码
+    
+    # ===== 命令行参数解析器设置 =====
+    # 创建命令行参数解析器，用于处理用户输入的训练参数
     parser = ArgumentParser(description="Training script parameters")
-    lp = ModelParams(parser)
-    op = OptimizationParams(parser)
-    pp = PipelineParams(parser)
-    parser.add_argument('--ip', type=str, default="127.0.0.1")
-    parser.add_argument('--port', type=int, default=6009)
-    parser.add_argument('--debug_from', type=int, default=-1)
-    parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument('--disable_viewer', action='store_true', default=False)
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
-    args = parser.parse_args(sys.argv[1:])
+    
+    # 添加三个主要的参数组：
+    lp = ModelParams(parser)        # 模型参数组：包含数据集路径、分辨率、SH阶数等模型相关参数
+    op = OptimizationParams(parser) # 优化参数组：包含学习率、迭代次数、损失权重等优化相关参数
+    pp = PipelineParams(parser)     # 管线参数组：包含渲染管线相关参数，如是否转换SH等
+    
+    # ===== 添加额外的命令行参数 =====
+    # GUI服务器相关参数
+    parser.add_argument('--ip', type=str, default="127.0.0.1")    # GUI服务器IP地址，默认本地
+    parser.add_argument('--port', type=int, default=6009)         # GUI服务器端口号
+    
+    # 调试相关参数
+    parser.add_argument('--debug_from', type=int, default=-1)     # 从第几次迭代开始启用调试模式，-1表示不启用
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)  # 是否启用PyTorch异常检测
+    
+    # 训练控制参数
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])     # 进行测试评估的迭代次数列表
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])     # 保存模型的迭代次数列表
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])            # 保存检查点的迭代次数列表（默认为空）
+    parser.add_argument("--start_checkpoint", type=str, default = None)                        # 启动时加载的检查点文件路径
+    
+    # 其他控制参数
+    parser.add_argument("--quiet", action="store_true")                    # 静默模式，减少输出信息
+    parser.add_argument('--disable_viewer', action='store_true', default=False)  # 是否禁用实时查看器GUI
+    
+    # ===== 解析命令行参数 =====
+    args = parser.parse_args(sys.argv[1:])  # 解析命令行参数（sys.argv[1:]排除脚本名称）
+    
+    # 将最终迭代次数添加到保存列表中，确保训练结束时保存模型
     args.save_iterations.append(args.iterations)
     
-    print("Optimizing " + args.model_path)
-
-    # Initialize system state (RNG)
-    safe_state(args.quiet)
-
-    # Start GUI server, configure and run training
+    # ===== 输出训练信息 =====
+    print("Optimizing " + args.model_path)  # 输出正在优化的模型路径
+    
+    # ===== 初始化系统状态 =====
+    safe_state(args.quiet)  # 初始化随机数生成器状态，确保实验的可重复性
+    
+    # ===== 启动GUI服务器（如果未禁用） =====
     if not args.disable_viewer:
+        # 初始化网络GUI服务器，用于实时可视化训练过程
+        # 允许用户通过浏览器实时查看渲染结果
         network_gui.init(args.ip, args.port)
+    
+    # ===== 设置PyTorch异常检测 =====
+    # 如果启用异常检测，PyTorch会在反向传播时检测NaN和无穷大值
+    # 这对调试很有用，但会降低训练速度
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
-
-    # All done
-    print("\nTraining complete.")
+    
+    # ===== 开始训练 =====
+    # 调用主训练函数，传入所有必要的参数
+    training(
+        lp.extract(args),           # 提取模型参数
+        op.extract(args),           # 提取优化参数  
+        pp.extract(args),           # 提取管线参数
+        args.test_iterations,       # 测试迭代列表
+        args.save_iterations,       # 保存迭代列表
+        args.checkpoint_iterations, # 检查点迭代列表
+        args.start_checkpoint,      # 起始检查点文件
+        args.debug_from            # 调试起始迭代
+    )
+    
+    # ===== 训练完成 =====
+    print("\nTraining complete.")  # 输出训练完成信息
