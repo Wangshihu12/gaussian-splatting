@@ -40,6 +40,36 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
+def get_gpu_memory_info():
+    """
+    获取GPU显存使用信息
+    
+    返回:
+    - allocated: 当前分配的显存 (GB)
+    - reserved: 当前保留的显存 (GB) 
+    - max_allocated: 最大分配显存 (GB)
+    - total: GPU总显存 (GB)
+    - utilization: 显存使用率 (%)
+    """
+    if not torch.cuda.is_available():
+        return None
+    
+    allocated = torch.cuda.memory_allocated() / (1024**3)
+    reserved = torch.cuda.memory_reserved() / (1024**3)
+    max_allocated = torch.cuda.max_memory_allocated() / (1024**3)
+    
+    # 获取GPU总显存（需要nvidia-ml-py库或使用torch的方法）
+    total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    utilization = (reserved / total) * 100
+    
+    return {
+        'allocated': allocated,
+        'reserved': reserved,
+        'max_allocated': max_allocated,
+        'total': total,
+        'utilization': utilization
+    }
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     """
     3D高斯点云渲染的主训练函数
@@ -205,10 +235,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
-            # 每10次迭代更新进度条
+            # 获取GPU显存信息
+            gpu_info = get_gpu_memory_info()
+
+            # 每10次迭代更新进度条和显存信息
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                if gpu_info:
+                    progress_bar.set_postfix({
+                        "Loss": f"{ema_loss_for_log:.{7}f}", 
+                        "Depth": f"{ema_Ll1depth_for_log:.{7}f}",
+                        "GPU": f"{gpu_info['allocated']:.1f}GB({gpu_info['utilization']:.1f}%)"
+                    })
+                else:
+                    progress_bar.set_postfix({
+                        "Loss": f"{ema_loss_for_log:.{7}f}", 
+                        "Depth": f"{ema_Ll1depth_for_log:.{7}f}"
+                    })
                 progress_bar.update(10)
+            
+            # 每100次迭代打印详细显存信息
+            if iteration % 100 == 0 and gpu_info:
+                print(f"\n[ITER {iteration}] GPU显存: "
+                      f"已分配={gpu_info['allocated']:.2f}GB, "
+                      f"已保留={gpu_info['reserved']:.2f}GB, "
+                      f"最大使用={gpu_info['max_allocated']:.2f}GB, "
+                      f"使用率={gpu_info['utilization']:.1f}%")
+                
             if iteration == opt.iterations:
                 progress_bar.close()
 
